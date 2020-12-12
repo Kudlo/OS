@@ -120,7 +120,18 @@ found:
     release(&p->lock);
     return 0;
   }
-
+  
+  // An empty kernel page table.
+  p->kpagetable = new_kernel_pagetable(); //TODO
+  if(p->kpagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  
+  uint64 va = KSTACK((int) (p - proc));
+  mappages(p->kpagetable, va, PGSIZE, kvmpa(va), PTE_R | PTE_W);
+  
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -141,7 +152,12 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  
+  if(p->kpagetable)
+    kfreepagetable(p->kpagetable, p->sz, p->kstack);  
+    
   p->pagetable = 0;
+  p->kpagetable = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -220,6 +236,7 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  //u2kvmcopy(p->pagetable, p->kpagetable, 0, p->sz);
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -243,11 +260,15 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    if (PGROUNDUP(sz + n) >= TRAPFRAME)
+      return -1;  
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    //u2kvmcopy(p->pagetable, p->kpagetable, sz-n, sz);
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    //u2kvmcopy(p->pagetable, p->kpagetable, sz, sz-n);
   }
   p->sz = sz;
   return 0;
@@ -274,6 +295,7 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+  //u2kvmcopy(p->pagetable, p->kpagetable, 0, np->sz);
 
   np->parent = p;
 
@@ -473,7 +495,13 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        
+        w_satp(MAKE_SATP(p->kpagetable));
+        sfence_vma();
+        
         swtch(&c->context, &p->context);
+        
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
